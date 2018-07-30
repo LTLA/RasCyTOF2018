@@ -212,21 +212,16 @@ for (x in sampleNames(new.nfs)) {
     cur.fcs <- Subset(cur.fcs, gate.dna)
     after.dna <- nrow(cur.fcs)
     cur.fcs <- Subset(cur.fcs, gate.cis)
-    after.cis <- nrow(cur.fcs)
+    after.dead <- nrow(cur.fcs)
     cur.fcs <- Subset(cur.fcs, gate.cd45)
     after.cd45 <- nrow(cur.fcs)
 
     saved[[x]] <- c(Total=nstart, -diff(c(nstart, Ce140=after.ce140, DNA=after.dna, 
-                                          Cisplatin=after.cis, CD45=after.cd45))/nstart)
+        `LIVE/DEAD`=after.dead, CD45=after.cd45))/nstart)
     description(cur.fcs)["transformation"] <- "logicle" # otherwise read.FCS doesn't like it.
-    write.FCS(cur.fcs, file.path(ref.out.dir, x))
+    write.FCS(cur.fcs[,tokeep], file.path(ref.out.dir, x))
 } 
 do.call(rbind, saved)
-```
-
-```{r, echo=FALSE, results="hide"}
-rm(new.nfs, pool.ff)
-gc()
 ```
 
 # Wrapping up 
