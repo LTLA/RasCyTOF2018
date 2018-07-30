@@ -1,0 +1,236 @@
+---
+title: "Pre-processing of the Ras/ICOS study"
+author: Aaron Lun
+date: "`r Sys.Date()`"
+output:
+  BiocStyle::html_document:
+    fig_caption: false
+    toc_float: true
+---
+
+```{r, echo=FALSE, results="hide"}
+knitr::opts_chunk$set(error=FALSE, message=FALSE, warning=FALSE)
+options(width=100)
+```
+
+# Introduction
+
+This describes the pre-processing of mass cytometry data collected from liver-derived immune cells.
+Cells were extracted 9 days after injection of active and inactive Ras, with or without the ICOSL blocker.
+Here, we load in the data.
+
+```{r}
+library(ncdfFlow)
+library(cydar)
+fcs <- list.files("fcs/original", full=TRUE, pattern="^c")[seq_len(18)]
+new.nfs <- suppressWarnings(suppressMessages(read.ncdfFlowSet(fcs)))
+totals <- numeric(length(new.nfs))
+for (i in seq_along(new.nfs)) { totals[i] <- nrow(new.nfs[[i]]) }
+```
+
+The experimental design is described as below.
+
+```{r}
+active <- rep(c("D38A", "G12V"), c(6, 12))
+blocked <- rep(c("unblocked", "blocked"), c(12, 6))
+metadata <- data.frame(File=basename(fcs), Activity=active, Block=blocked)
+write.table(file="metadata.tsv", metadata, sep="\t", quote=FALSE, row.names=FALSE)
+metadata
+```
+
+We pool the cells for standardized calculation of transformation and gating parameters.
+We take 50000 cells from each sample, otherwise we'll run out of memory.
+
+```{r}
+pool.ff <- poolCells(new.nfs, n=50e3)
+parameters(pool.ff)$desc <- parameters(new.nfs[[1]])$desc
+descriptions <- as.character(parameters(pool.ff)$desc)
+descriptions
+```
+
+# Transformation onto the logicle scale.
+
+Here, we estimate the parameters of the logicle transformation for each channel.
+The transformation is then applied to the intensities of the pooled cells.
+
+```{r}
+to.transform <- !is.na(descriptions)
+lgcl <- estimateLogicle(pool.ff, channels=colnames(pool.ff)[to.transform], type='data')
+pool.ff <- transform(pool.ff, lgcl)
+```
+
+We look at the trend in the intensities with respect to time, to check that normalization of detector shift was done properly.
+
+```{r, fig.width=10, fig.height=6}
+par(mfrow=c(1,2))
+smoothScatter(exprs(pool.ff)[,"Time"], exprs(pool.ff)[,"Ir191Di"], main="DNA")
+smoothScatter(exprs(pool.ff)[,"Time"], exprs(pool.ff)[,"Pt195Di"], main="Dead")
+```
+
+We will apply the transformation to the raw data later, for purposes of memory efficiency.
+
+```{r, echo=FALSE, results="hide"}
+gc()
+```
+
+# Setting up the gates
+
+## Gating out the beads
+
+We remove the control beads that were previously used for normalization, based on the 140-Ce channel.
+We set the upper threshold to 2, because the control beads should be labelled quite strongly with this isotope.
+(Besides, the control beads shouldn't be barcoded, so there shouldn't be many here anyway.)
+
+```{r}
+chosen <- colnames(pool.ff)[grep("140Ce", descriptions)]
+gate.140 <- outlierGate(pool.ff, chosen, type="upper")
+gate.140@max <- max(gate.140@max, 2)
+plot(density(exprs(pool.ff)[,chosen]), main="Ce-140 intensity")
+abline(v=gate.140@max, col="red", lty=2, lwd=2)
+```
+
+Here, we can examine the proportion of events removed by this gate.
+
+```{r}
+original <- nrow(pool.ff)
+pool.ff <- Subset(pool.ff, gate.140)
+1-nrow(pool.ff)/original
+```
+
+```{r, echo=FALSE, results="hide"}
+gc()
+```
+
+## Gating out debris and doublets
+
+We examine the two iridium channels corresponding to the DNA intercalating agent.
+We assume that the lower peak of intensities corresponds to singlets.
+We proceed to gate out the higher values (presumably doublets) and the lower values (presumably debris).
+
+```{r}
+chosen1 <- colnames(pool.ff)[grepl("DNA1", descriptions)]
+chosen2 <- colnames(pool.ff)[grepl("DNA2", descriptions)]
+gate.dna <- dnaGate(pool.ff, chosen1, chosen2, rank=1, adjust=0.5)
+smoothScatter(exprs(pool.ff)[,chosen1], exprs(pool.ff)[,chosen2],
+    xlab="DNA1 (Ir191)", ylab="DNA2 (Ir193)")
+polygon(gate.dna@boundaries[,1], gate.dna@boundaries[,2], border="red", lwd=2)
+```
+
+Here, we can examine the proportion of events removed by this gate.
+
+```{r}
+original <- nrow(pool.ff)
+pool.ff <- Subset(pool.ff, gate.dna)
+1-nrow(pool.ff)/original
+```
+
+```{r, echo=FALSE, results="hide"}
+gc()
+```
+
+## Gating out dead cells
+
+The live/dead marker is cisplatin and used to mark dead cells, so we want to gate out large outliers.
+
+```{r}
+chosen <- colnames(pool.ff)[grepl("LIVE_DEAD", descriptions)]
+gate.cis <- outlierGate(pool.ff, chosen, type="upper")
+gate.cis@max <- 0.1
+plot(density(exprs(pool.ff)[,chosen]), main="LIVE_DEAD")
+abline(v=gate.cis@max, col="red", lwd=2, lty=2)
+```
+
+Again, examining the proportion of events removed by this gate.
+
+```{r}
+original <- nrow(pool.ff)
+pool.ff <- Subset(pool.ff, gate.cis)
+1-nrow(pool.ff)/original
+```
+
+## Gating on high CD45
+
+Obviously, we're only interested in immune cells, so we gate out things that aren't CD45-positive.
+
+```{r}
+chosen <- colnames(pool.ff)[grep("CD45", descriptions)]
+gate.cd45 <- outlierGate(pool.ff, chosen, type="lower", nmads=4)
+plot(density(exprs(pool.ff)[,chosen]), main="CD45")
+abline(v=gate.cd45@min, col="red", lwd=2, lty=2)
+```
+
+Again, examining the proportion of events removed by this gate.
+
+```{r}
+original <- nrow(pool.ff)
+pool.ff <- Subset(pool.ff, gate.cd45)
+1-nrow(pool.ff)/original
+```
+
+# Channel inspection
+
+We inspect all channels to see which ones are informative.
+An uninformative channel would be something that was totally empty (or close to it).
+This may occur if the antibody failed or if the detector wasn't configured properly. 
+
+```{r, fig.width=8, fig.height=16, dpi=150}
+to.plot <- grep("_", descriptions)
+par(mfrow=c(7, 4), mar=c(1.5,2,3.5,0.1))
+for (x in to.plot) {
+    plot(density(exprs(pool.ff)[,x]), main=descriptions[x])
+}
+```
+
+We decide which channels we want to keep.
+We remove the gated channels because, once used, we don't need them anymore.
+
+```{r}
+to.ignore <- is.na(descriptions) | # Eliminating time, length and other features.
+             grepl("1[0-9][0-9]Pd_", descriptions) | # Eliminating barcodes.
+             grepl("(DNA|LIVE_DEAD|CD45)", descriptions) | # Getting rid of QC things.
+             !grepl("_", descriptions)
+tokeep <- which(!to.ignore)
+descriptions[to.ignore]
+```
+
+# Transforming and gating the raw data
+
+We run through the files, subsetting by the specified gates, and saving the FCS files.
+This allows us to use the exact same transformed intensities for tools that requires FCS input.
+We also show the proportion of events lost in each file after each set of gates.
+
+```{r}
+ref.out.dir <- "fcs/processed"
+dir.create(ref.out.dir, showWarning=FALSE)
+saved <- list()
+for (x in sampleNames(new.nfs)) {
+    cur.fcs <- transform(new.nfs[[x]], lgcl)
+
+    nstart <- nrow(cur.fcs)
+    cur.fcs <- Subset(cur.fcs, gate.140)
+    after.ce140 <- nrow(cur.fcs) 
+    cur.fcs <- Subset(cur.fcs, gate.dna)
+    after.dna <- nrow(cur.fcs)
+    cur.fcs <- Subset(cur.fcs, gate.cis)
+    after.cis <- nrow(cur.fcs)
+    cur.fcs <- Subset(cur.fcs, gate.cd45)
+    after.cd45 <- nrow(cur.fcs)
+
+    saved[[x]] <- c(Total=nstart, -diff(c(nstart, Ce140=after.ce140, DNA=after.dna, 
+                                          Cisplatin=after.cis, CD45=after.cd45))/nstart)
+    description(cur.fcs)["transformation"] <- "logicle" # otherwise read.FCS doesn't like it.
+    write.FCS(cur.fcs, file.path(ref.out.dir, x))
+} 
+do.call(rbind, saved)
+```
+
+```{r, echo=FALSE, results="hide"}
+rm(new.nfs, pool.ff)
+gc()
+```
+
+# Wrapping up 
+
+```{r}
+sessionInfo()
+```
