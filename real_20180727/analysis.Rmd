@@ -1,0 +1,268 @@
+---
+title: Testing for differential abundance in the Ras/ICOSL experiment
+author: Aaron Lun
+date: "`r Sys.Date()`"
+output:
+  BiocStyle::html_document:
+    fig_caption: false
+    toc_float: true
+---
+
+```{r, echo=FALSE, results='hide'}
+dir.create("pics", showWarnings=FALSE)
+knitr::opts_chunk$set(error=FALSE, warning=FALSE, message=FALSE)
+options(width=100)
+```
+
+# Loading counts
+
+We have previously transformed the intensities and gated out low-quality cells with no DNA signal, high LIVE-DEAD signal or a non-immune phenotype.
+We load in the transformed intensities using the `r Biocpkg("ncdfFlow")` package.
+
+```{r}
+library(ncdfFlow)
+incoming <- read.ncdfFlowSet(list.files("fcs/processed", full=TRUE))
+colnames(incoming) <- markernames(incoming)
+```
+
+We check the distribution of distances with respect to the cell counts.
+This checks whether the tolerance of 0.5 is large enough for large counts in each hypersphere.
+
+```{r}
+library(cydar)
+cd <- prepareCellData(incoming)
+dist <- neighborDistances(cd)
+boxplot(dist, xlab="Number of neighbors", ylab="Tolerance")
+abline(h=0.5, col="red", lwd=2, lty=2)
+```
+
+Finally, we count cells into hyperspheres with radius defined by `tol`.
+
+```{r}
+out <- countCells(cd, BPPARAM=SerialParam(), downsample=10, tol=0.5)
+```
+
+# Setting up the design matrix
+
+Each sample is annotated with a genotype and whether or not ICOSL is blocked.
+G12V corresponds to active Ras while D38A represents inactive Ras.
+
+```{r}
+meta <- read.table("metadata.tsv", header=TRUE, stringsAsFactor=FALSE)
+meta
+```
+
+We make sure the sample labels match the annotation.
+
+```{r}
+m <- match(colnames(out), meta$File)
+all.metadata <- meta[m,]
+all.metadata
+```
+
+Finally, we set up our design matrix.
+Each day/treatment combination forms a group, and we block on the batch.
+This allows us to support arbitrary changes in abundance with respect to time.
+
+```{r}
+g <- factor(paste0(all.metadata$Activity, "_", all.metadata$Block))
+design <- model.matrix(~ 0 + g)
+colnames(design) <- levels(g)
+colnames(design)
+```
+
+# Modelling biological variability
+
+We convert the object to a `DGEList` and filter out low-abundance hyperspheres with average counts below 1.
+
+```{r}
+library(edgeR)
+y <- DGEList(assay(out), lib.size=out$totals)
+y$samples <- cbind(y$samples, all.metadata[,-1])
+keep <- aveLogCPM(y) >= aveLogCPM(1, mean(out$totals))
+summary(keep)
+y <- y[keep,] 
+out <- out[keep,]
+```
+
+We make a MDS plot to examine similarities and differences between samples.
+
+```{r}
+adjc <- cpm(y, log=TRUE, prior.count=3)
+col <- c("blue", "red")[factor(all.metadata$Activity)]
+plotMDS(adjc, label=g, col=col)
+```
+
+We see that there is a strong discrepancy with some of the replicates.
+We'll account for latent factors of variation using the first 3 PCs of the residual matrix.
+
+```{r}
+library(RUVSeq)
+fit <- lmFit(adjc, design)
+resids <- adjc - tcrossprod(fit$coef, design)
+pcs <- prcomp(t(resids))
+latents <- pcs$x[,1:3]
+redesign <- cbind(design, latents)
+redesign
+```
+
+Cell counts are modelled with the negative binomial (NB) distribution.
+We estimate the NB dispersion to account for biological variability in the abundances for each hypersphere.
+This is done using a mean-dependent trend to account for empirical mean-variance relationships.
+
+```{r}
+y <- estimateDisp(y, redesign)
+plotBCV(y)
+```
+
+We use the quasi-likelihood dispersion to model hypersphere-specific variability.
+Thie complements the trended NB dispersion by describing how the dispersions vary around the trend for each hypersphere.
+The degrees of freedom describes the extent to which we can share information between hyperspheres to improve estimation.
+
+```{r}
+fit <- glmQLFit(y, redesign, robust=TRUE)
+summary(fit$df.prior)
+plotQLDisp(fit)
+```
+
+# Differential abundance at any time point
+
+We test for differential abundance along the two contrescuets in this data set.
+
+```{r}
+con <- makeContrescuets(RasEffect = G12V_unblocked - D38A_unblocked,
+    BlockEffect=G12V_blocked - G12V_unblocked,
+    levels=redesign)
+```
+
+We first examine the effect of adding Ras.
+
+```{r}
+res.rescue <- glmQLFTest(fit, contrescuet=con[,"RasEffect"])
+qval.rescue <- spatialFDR(intensities(out), res.rescue$table$PValue)
+is.sig.rescue <- qval.rescue <= 0.05
+summary(is.sig.rescue)
+```
+
+We next examine the effect of adding the ICOS block.
+
+```{r}
+res.block <- glmQLFTest(fit, contrescuet=con[,"BlockEffect"])
+qval.block <- spatialFDR(intensities(out), res.block$table$PValue)
+is.sig.block <- qval.block <= 0.05
+summary(is.sig.block)
+```
+
+We finally identify hyperspheres that are rescued upon ICOS block.
+
+```{r}
+IUT.p <- pmax(res.rescue$table$PValue, res.block$table$PValue)
+IUT.p[sign(res.block$table$logFC)==sign(res.rescue$table$logFC)] <- 1
+res.rescue <- list(table=data.frame(
+    block.logFC=res.block$table$logFC, 
+    rescue.logFC=res.rescue$table$logFC, 
+    logCPM=res.block$table$logCPM,
+    PValue=IUT.p
+))
+qval.rescue <- spatialFDR(intensities(out), res.rescue$table$PValue)
+is.sig.rescue <- qval.rescue <= 0.05
+summary(is.sig.rescue)
+```
+
+# Making pretty plots 
+
+## Dimensionality reduction
+
+We'll use _t_-SNE on all hyperspheres to create a low-dimensional embedding in 2D space.
+
+```{r}
+set.seed(200)
+library(Rtsne)
+t.out <- Rtsne(intensities(out), perplexity=50, pca=FALSE)
+```
+
+We label the plot based on the marker intensities.
+
+```{r}
+png(file.path("pics", "markers.png"), width=20, height=20, units="in", res=300)
+reranges <- intensityRanges(out)
+lmat <- cbind(matrix(seq_len(5*5), ncol=5, nrow=5), 26)
+layout(lmat, widths=c(rep(1, 5), 0.2))
+
+all.intensities <- intensities(out)
+for (i in order(colnames(all.intensities))) {
+    par(mar=c(2.1, 2.1, 2.1, 2.1))
+    col <- plotCellIntensity(t.out$Y[,1], t.out$Y[,2], all.intensities[,i], 
+        irange=reranges[,i], main=colnames(all.intensities)[i], cex=1, 
+        xlab="t-SNE1", ylab="t-SNE2")
+}
+for (j in seq_len(25-ncol(all.intensities))) { plot.new() }
+
+# Creating the color scale.
+par(mar=c(0,0,0,0))
+plot(0,0, type="n", axes=FALSE, ylab="", xlab="", ylim=c(-1, 1), xlim=c(-1, 0.5))
+start.loc <- seq(-0.5, 0.5, length.out=length(col))
+interval <- diff(start.loc)[1]
+rect(-0.5, start.loc, 0.5, start.loc+interval, col=col, border=col)
+text(0, -0.5, pos=1, "Low", cex=1.5)
+text(0, 0.5+interval,  pos=3, "High", cex=1.5)
+text(-0.9, 0, pos=1, srt=90, "Marker intensity", cex=1.5)
+dev.off()
+```
+
+## Colouring by log-fold change
+ 
+We create a function to plot based on the log-fold change.
+
+```{r}
+PLOT_LFC <- function(logfc, is.sig, ...) { 
+    layout(cbind(1,2), widths=c(10, 1))
+    par(mar=c(5.1,4.1,4.1,1.1))
+    col <- plotCellLogFC(t.out$Y[,1], t.out$Y[,2], logfc, max.logFC=3,
+        xlab="t-SNE1", ylab="t-SNE2", cex.axis=1.2, cex.lab=1.4, 
+        cex.main=1.4, cex=as.integer(is.sig), ...)
+
+    par(mar=c(0,0,0,0))
+    plot(0,0, type="n", axes=FALSE, ylab="", xlab="", ylim=c(-1, 1), xlim=c(-1, 0.5))
+    start.loc <- seq(-0.5, 0.5, length.out=length(col))
+    rect(-0.5, start.loc, 0.5, start.loc+diff(start.loc)[1], col=col, border=col)
+    text(0, -0.5, pos=1, names(col)[1], cex=1.2)
+    text(0, 0.5,  pos=3, names(col)[length(col)], cex=1.2)
+    text(-0.9, 0, pos=1, srt=90, "Log-FC", cex=1)
+}
+```
+
+We apply this to each of our comparisons.
+
+```{r}
+png(file.path("pics", "rescue.png"), width=6, height=6, units="in", res=300)
+PLOT_LFC(res.rescue$table$logFC, is.sig.rescue, main="Active/inactive")
+dev.off()
+
+png(file.path("pics", "block.png"), width=6, height=6, units="in", res=300)
+PLOT_LFC(res.block$table$logFC, is.sig.block, main="Blocked/unblocked")
+dev.off()
+
+png(file.path("pics", "rescue.png"), width=6, height=6, units="in", res=300)
+PLOT_LFC(res.rescue$table$block.logFC - res.rescue$table$rescue.logFC,
+    is.sig.rescue, main="Block rescue")
+dev.off()
+```
+
+# Session information
+
+Saving objects.
+
+```{r}
+saveRDS(list(out=out, y=y, fit=fit,
+    res.rescue=cbind(res.rescue$table, FDR=qval.rescue),            
+    res.block=cbind(res.block$table, FDR=qval.block),            
+    res.rescue=cbind(res.rescue$table, FDR=qval.rescue),            
+    file="counts.rds")
+```
+
+Printing out the session information.
+
+```{r}
+sessionInfo()
+```
