@@ -97,7 +97,6 @@ We see that there is a strong discrepancy with some of the replicates.
 We'll account for latent factors of variation using the first 3 PCs of the residual matrix.
 
 ```{r}
-library(RUVSeq)
 fit <- lmFit(adjc, design)
 resids <- adjc - tcrossprod(fit$coef, design)
 pcs <- prcomp(t(resids))
@@ -130,7 +129,7 @@ plotQLDisp(fit)
 We test for differential abundance along the two contrescuets in this data set.
 
 ```{r}
-con <- makeContrescuets(RasEffect = G12V_unblocked - D38A_unblocked,
+con <- makeContrasts(RasEffect = G12V_unblocked - D38A_unblocked,
     BlockEffect=G12V_blocked - G12V_unblocked,
     levels=redesign)
 ```
@@ -138,16 +137,16 @@ con <- makeContrescuets(RasEffect = G12V_unblocked - D38A_unblocked,
 We first examine the effect of adding Ras.
 
 ```{r}
-res.rescue <- glmQLFTest(fit, contrescuet=con[,"RasEffect"])
-qval.rescue <- spatialFDR(intensities(out), res.rescue$table$PValue)
-is.sig.rescue <- qval.rescue <= 0.05
-summary(is.sig.rescue)
+res.ras <- glmQLFTest(fit, contrast=con[,"RasEffect"])
+qval.ras <- spatialFDR(intensities(out), res.ras$table$PValue)
+is.sig.ras <- qval.ras <= 0.05
+summary(is.sig.ras)
 ```
 
 We next examine the effect of adding the ICOS block.
 
 ```{r}
-res.block <- glmQLFTest(fit, contrescuet=con[,"BlockEffect"])
+res.block <- glmQLFTest(fit, contrast=con[,"BlockEffect"])
 qval.block <- spatialFDR(intensities(out), res.block$table$PValue)
 is.sig.block <- qval.block <= 0.05
 summary(is.sig.block)
@@ -156,11 +155,11 @@ summary(is.sig.block)
 We finally identify hyperspheres that are rescued upon ICOS block.
 
 ```{r}
-IUT.p <- pmax(res.rescue$table$PValue, res.block$table$PValue)
-IUT.p[sign(res.block$table$logFC)==sign(res.rescue$table$logFC)] <- 1
+IUT.p <- pmax(res.ras$table$PValue, res.block$table$PValue)
+IUT.p[sign(res.block$table$logFC)==sign(res.ras$table$logFC)] <- 1
 res.rescue <- list(table=data.frame(
     block.logFC=res.block$table$logFC, 
-    rescue.logFC=res.rescue$table$logFC, 
+    ras.logFC=res.ras$table$logFC, 
     logCPM=res.block$table$logCPM,
     PValue=IUT.p
 ))
@@ -174,26 +173,29 @@ summary(is.sig.rescue)
 ## Dimensionality reduction
 
 We'll use _t_-SNE on all hyperspheres to create a low-dimensional embedding in 2D space.
+We set `pca=FALSE` as there are too few markers to make a PCA worthwhile.
 
 ```{r}
 set.seed(200)
 library(Rtsne)
 t.out <- Rtsne(intensities(out), perplexity=50, pca=FALSE)
+head(t.out$Y) 
 ```
 
 We label the plot based on the marker intensities.
 
 ```{r}
-png(file.path("pics", "markers.png"), width=20, height=20, units="in", res=300)
 reranges <- intensityRanges(out)
+all.intensities <- intensities(out)
+fresh.markers <- sub("^[0-9]+[A-Za-z]+_", "", markernames(out))
+
+png(file.path("pics", "markers.png"), width=20, height=20, units="in", res=300)
 lmat <- cbind(matrix(seq_len(5*5), ncol=5, nrow=5), 26)
 layout(lmat, widths=c(rep(1, 5), 0.2))
-
-all.intensities <- intensities(out)
-for (i in order(colnames(all.intensities))) {
+for (i in order(fresh.markers)) { 
     par(mar=c(2.1, 2.1, 2.1, 2.1))
-    col <- plotCellIntensity(t.out$Y[,1], t.out$Y[,2], all.intensities[,i], 
-        irange=reranges[,i], main=colnames(all.intensities)[i], cex=1, 
+    col <- plotSphereIntensity(t.out$Y[,1], t.out$Y[,2], all.intensities[,i], 
+        irange=reranges[,i], main=fresh.markers[i], cex=1, 
         xlab="t-SNE1", ylab="t-SNE2")
 }
 for (j in seq_len(25-ncol(all.intensities))) { plot.new() }
@@ -201,11 +203,7 @@ for (j in seq_len(25-ncol(all.intensities))) { plot.new() }
 # Creating the color scale.
 par(mar=c(0,0,0,0))
 plot(0,0, type="n", axes=FALSE, ylab="", xlab="", ylim=c(-1, 1), xlim=c(-1, 0.5))
-start.loc <- seq(-0.5, 0.5, length.out=length(col))
-interval <- diff(start.loc)[1]
-rect(-0.5, start.loc, 0.5, start.loc+interval, col=col, border=col)
-text(0, -0.5, pos=1, "Low", cex=1.5)
-text(0, 0.5+interval,  pos=3, "High", cex=1.5)
+createColorBar(col, "High", "Low")
 text(-0.9, 0, pos=1, srt=90, "Marker intensity", cex=1.5)
 dev.off()
 ```
@@ -218,16 +216,13 @@ We create a function to plot based on the log-fold change.
 PLOT_LFC <- function(logfc, is.sig, ...) { 
     layout(cbind(1,2), widths=c(10, 1))
     par(mar=c(5.1,4.1,4.1,1.1))
-    col <- plotCellLogFC(t.out$Y[,1], t.out$Y[,2], logfc, max.logFC=3,
+    col <- plotSphereLogFC(t.out$Y[,1], t.out$Y[,2], logfc, max.logFC=3,
         xlab="t-SNE1", ylab="t-SNE2", cex.axis=1.2, cex.lab=1.4, 
         cex.main=1.4, cex=as.integer(is.sig), ...)
 
     par(mar=c(0,0,0,0))
     plot(0,0, type="n", axes=FALSE, ylab="", xlab="", ylim=c(-1, 1), xlim=c(-1, 0.5))
-    start.loc <- seq(-0.5, 0.5, length.out=length(col))
-    rect(-0.5, start.loc, 0.5, start.loc+diff(start.loc)[1], col=col, border=col)
-    text(0, -0.5, pos=1, names(col)[1], cex=1.2)
-    text(0, 0.5,  pos=3, names(col)[length(col)], cex=1.2)
+    createColorBar(col)
     text(-0.9, 0, pos=1, srt=90, "Log-FC", cex=1)
 }
 ```
@@ -235,17 +230,55 @@ PLOT_LFC <- function(logfc, is.sig, ...) {
 We apply this to each of our comparisons.
 
 ```{r}
-png(file.path("pics", "rescue.png"), width=6, height=6, units="in", res=300)
-PLOT_LFC(res.rescue$table$logFC, is.sig.rescue, main="Active/inactive")
+png(file.path("pics", "tsne_ras.png"), width=6, height=6, units="in", res=300)
+PLOT_LFC(res.ras$table$logFC, is.sig.ras, main="Active/inactive")
 dev.off()
 
-png(file.path("pics", "block.png"), width=6, height=6, units="in", res=300)
+png(file.path("pics", "tsne_block.png"), width=6, height=6, units="in", res=300)
 PLOT_LFC(res.block$table$logFC, is.sig.block, main="Blocked/unblocked")
 dev.off()
 
-png(file.path("pics", "rescue.png"), width=6, height=6, units="in", res=300)
-PLOT_LFC(res.rescue$table$block.logFC - res.rescue$table$rescue.logFC,
+png(file.path("pics", "tsne_rescue.png"), width=6, height=6, units="in", res=300)
+PLOT_LFC(res.rescue$table$block.logFC + res.rescue$table$ras.logFC,
     is.sig.rescue, main="Block rescue")
+dev.off()
+```
+
+## Heatmaps 
+
+We set up a function to create heatmaps of representative hyperspheres for each contrast.
+
+```{r}
+require(pheatmap)
+HEAT_FUN <- function(pvals, logfc, is.sig, ...) {
+    nonred <- findFirstSphere(out, pvals, threshold=1)
+    keep <- nonred & is.sig
+    to.show <- intensities(out)[keep,]
+    rownames(to.show) <- seq_len(nrow(to.show))
+    colnames(to.show) <- fresh.markers
+
+    pheatmap(to.show, color=viridis::magma(100), show_rownames=FALSE,
+        annotation_row=data.frame(logFC=ifelse(logfc[keep] > 0, "Up", "Down"), 
+            row.names=rownames(to.show)),
+        annotation_colors=list(logFC=c(Down="blue", Up="red")))
+}
+```
+
+We apply this to each of our comparisons.
+
+```{r}
+png(file.path("pics", "heat_ras.png"), width=6, height=6, units="in", res=300)
+HEAT_FUN(res.ras$table$PValue, res.ras$table$logFC, is.sig.ras)
+dev.off()
+
+png(file.path("pics", "heat_block.png"), width=6, height=6, units="in", res=300)
+HEAT_FUN(res.block$table$PValue, res.block$table$logFC, is.sig.block)
+dev.off()
+
+png(file.path("pics", "heat_rescue.png"), width=6, height=6, units="in", res=300)
+HEAT_FUN(res.rescue$table$PValue, 
+    res.rescue$table$block.logFC + res.rescue$table$ras.logFC,
+    is.sig.rescue)
 dev.off()
 ```
 
@@ -255,9 +288,9 @@ Saving objects.
 
 ```{r}
 saveRDS(list(out=out, y=y, fit=fit,
-    res.rescue=cbind(res.rescue$table, FDR=qval.rescue),            
-    res.block=cbind(res.block$table, FDR=qval.block),            
-    res.rescue=cbind(res.rescue$table, FDR=qval.rescue),            
+    res.ras=cbind(res.ras$table, FDR=qval.ras),
+    res.block=cbind(res.block$table, FDR=qval.block),
+    res.rescue=cbind(res.rescue$table, FDR=qval.rescue),
     file="counts.rds")
 ```
 
