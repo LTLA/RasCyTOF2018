@@ -284,16 +284,6 @@ dev.off()
 
 # Session information
 
-Saving objects.
-
-```{r}
-saveRDS(list(out=out, y=y, fit=fit,
-    res.ras=cbind(res.ras$table, FDR=qval.ras),
-    res.block=cbind(res.block$table, FDR=qval.block),
-    res.rescue=cbind(res.rescue$table, FDR=qval.rescue),
-    file="counts.rds")
-```
-
 Printing out the session information.
 
 ```{r}
