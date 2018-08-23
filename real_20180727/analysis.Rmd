@@ -284,8 +284,22 @@ dev.off()
 
 # Session information
 
+Saving some bits for later visualization.
+
+```{r}
+saveRDS(list(data=out,
+        tab.ras=cbind(res.ras$table, FDR=qval.ras),
+        tab.block=cbind(res.block$table, FDR=qval.block),
+        tab.rescue=cbind(res.rescue$table, FDR=qval.rescue),
+        TSNE=t.out$Y),
+    file="objects.rds")        
+```
+
 Printing out the session information.
 
 ```{r}
 sessionInfo()
 ```
+
+
+
