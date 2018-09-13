@@ -89,7 +89,7 @@ We make a MDS plot to examine similarities and differences between samples.
 
 ```{r}
 adjc <- cpm(y, log=TRUE, prior.count=3)
-col <- c("blue", "red")[factor(all.metadata$Activity)]
+col <- c("blue", "red", "forestgreen")[factor(g)]
 plotMDS(adjc, label=g, col=col)
 ```
 
@@ -208,6 +208,20 @@ text(-0.9, 0, pos=1, srt=90, "Marker intensity", cex=1.5)
 dev.off()
 ```
 
+We also create separate plots for each marker.
+
+```{r}
+for (i in order(fresh.markers)) { 
+    par(mar=c(2.1, 2.1, 2.1, 2.1))
+    png(file.path("pics", paste0(fresh.markers[i], ".png")), 
+        width=6, height=6, units="in", res=300)
+    col <- plotSphereIntensity(t.out$Y[,1], t.out$Y[,2], all.intensities[,i], 
+        irange=reranges[,i], main=fresh.markers[i], cex=1, 
+        xlab="t-SNE1", ylab="t-SNE2")
+    dev.off()
+}
+```
+
 ## Colouring by log-fold change
  
 We create a function to plot based on the log-fold change.
@@ -300,6 +314,3 @@ Printing out the session information.
 ```{r}
 sessionInfo()
 ```
-
-
-
