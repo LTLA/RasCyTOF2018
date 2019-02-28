@@ -188,6 +188,7 @@ We label the plot based on the marker intensities.
 reranges <- intensityRanges(out)
 all.intensities <- intensities(out)
 fresh.markers <- sub("^[0-9]+[A-Za-z]+_", "", markernames(out))
+col.range <- colorRampPalette(c("grey80", "red"))(100)
 
 png(file.path("pics", "markers.png"), width=20, height=20, units="in", res=300)
 lmat <- cbind(matrix(seq_len(5*5), ncol=5, nrow=5), 26)
@@ -195,7 +196,7 @@ layout(lmat, widths=c(rep(1, 5), 0.2))
 for (i in order(fresh.markers)) { 
     par(mar=c(2.1, 2.1, 2.1, 2.1))
     col <- plotSphereIntensity(t.out$Y[,1], t.out$Y[,2], all.intensities[,i], 
-        irange=reranges[,i], main=fresh.markers[i], cex=1, 
+        irange=reranges[,i], main=fresh.markers[i], cex=1, col.range=col.range,
         xlab="t-SNE1", ylab="t-SNE2")
 }
 for (j in seq_len(25-ncol(all.intensities))) { plot.new() }
@@ -216,7 +217,7 @@ for (i in order(fresh.markers)) {
     png(file.path("pics", paste0(fresh.markers[i], ".png")), 
         width=6, height=6, units="in", res=300)
     col <- plotSphereIntensity(t.out$Y[,1], t.out$Y[,2], all.intensities[,i], 
-        irange=reranges[,i], main=fresh.markers[i], cex=1, 
+        irange=reranges[,i], main=fresh.markers[i], cex=1, col.range=col.range,
         xlab="t-SNE1", ylab="t-SNE2")
     dev.off()
 }
